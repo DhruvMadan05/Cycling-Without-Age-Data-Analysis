@@ -121,6 +121,69 @@ ORDER BY pilot_count DESC, rides_completed ASC;
 """.strip()
 
 
+# Query for average approved rides per pilot by country
+# Active pilot: last approved ride within the past year
+# Inactive pilot: no approved rides in past year (includes pilots with zero approved rides)
+AVG_RIDES_PER_PILOT_BY_COUNTRY_QUERY = """
+WITH pilots AS (
+	SELECT
+		u.id AS pilot_id
+	FROM public.account a
+	JOIN public."user" u ON u.id = a.user_id
+	WHERE a.is_trained_pilot = true
+),
+approved_trips AS (
+	SELECT
+		t.pilot_id,
+		t.start,
+		COALESCE(NULLIF(TRIM(c.country), ''), 'Unknown') AS chapter_country
+	FROM public.trip t
+	JOIN public.community c ON c.id = t.community_id
+	WHERE t.status = 'approved'
+		AND t.pilot_id IS NOT NULL
+),
+pilot_trip_summary AS (
+	SELECT
+		p.pilot_id,
+		COALESCE(COUNT(at.pilot_id), 0) AS approved_ride_count,
+		MAX(at.start) AS last_approved_trip_at
+	FROM pilots p
+	LEFT JOIN approved_trips at ON at.pilot_id = p.pilot_id
+	GROUP BY p.pilot_id
+),
+pilot_last_chapter_country AS (
+	SELECT DISTINCT ON (at.pilot_id)
+		at.pilot_id,
+		at.chapter_country
+	FROM approved_trips at
+	ORDER BY at.pilot_id, at.start DESC
+),
+classified AS (
+	SELECT
+		COALESCE(plcc.chapter_country, 'Unknown') AS country,
+		pts.approved_ride_count,
+		CASE
+			WHEN pts.last_approved_trip_at IS NOT NULL
+				AND pts.last_approved_trip_at > NOW() - INTERVAL '1 year' THEN 'active'
+			ELSE 'inactive'
+		END AS pilot_status
+	FROM pilot_trip_summary pts
+	LEFT JOIN pilot_last_chapter_country plcc ON plcc.pilot_id = pts.pilot_id
+)
+SELECT
+	c.country,
+	ROUND(AVG(c.approved_ride_count) FILTER (WHERE c.pilot_status = 'active')::numeric, 2) AS avg_rides_active_pilots,
+	ROUND(AVG(c.approved_ride_count) FILTER (WHERE c.pilot_status = 'inactive')::numeric, 2) AS avg_rides_inactive_pilots,
+	ROUND(AVG(c.approved_ride_count)::numeric, 2) AS avg_rides_all_pilots,
+	COUNT(*) FILTER (WHERE c.pilot_status = 'active') AS active_pilot_count,
+	COUNT(*) FILTER (WHERE c.pilot_status = 'inactive') AS inactive_pilot_count,
+	COUNT(*) AS total_pilot_count
+FROM classified c
+GROUP BY c.country
+ORDER BY avg_rides_all_pilots DESC NULLS LAST, c.country;
+""".strip()
+
+
 # Query for pilot details filtered by an exact number of approved rides completed
 PILOT_DETAILS_BY_RIDE_COUNT_QUERY = """
 WITH pilot_ride_summary AS (
@@ -454,7 +517,17 @@ def export_dataframe(df: pd.DataFrame, export_name: str, export: bool) -> None:
 	print(f"Exported {len(df)} rows to {output_path}")
 
 
-def plot_avg_trip_duration_by_country(engine, export: bool = False) -> None:
+def export_plot_figure(fig, export_name: str, export: bool, dpi: int = 300) -> None:
+	if not export:
+		return
+
+	os.makedirs("data_export", exist_ok=True)
+	output_path = os.path.join("data_export", f"{export_name}.png")
+	fig.savefig(output_path, dpi=dpi, bbox_inches="tight", pad_inches=0.25)
+	print(f"Exported plot to {output_path}")
+
+
+def plot_avg_trip_duration_by_country(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, AVG_TRIP_DURATION_QUERY)
 	if df.empty:
 		print("No data returned for avg trip duration query.")
@@ -463,13 +536,14 @@ def plot_avg_trip_duration_by_country(engine, export: bool = False) -> None:
 	export_dataframe(df, "avg_duration", export)
 	print(df.to_string(index=False))
 
-	plt.figure(figsize=(11, 6))
+	fig = plt.figure(figsize=(11, 6))
 	plt.bar(df["country"], df["avg_minutes"])
 	plt.title("Average Approved Trip Duration by Country")
 	plt.xlabel("Country")
 	plt.ylabel("Avg Minutes")
 	plt.xticks(rotation=45, ha="right")
 	plt.tight_layout()
+	export_plot_figure(fig, "avg_duration_plot", export_image)
 	plt.show()
 
 
@@ -483,7 +557,7 @@ def show_pilot_details_by_ride_count(engine, ride_count: int, export: bool = Fal
 	print(df.to_string(index=False))
 
 
-def plot_active_chapters_in_denmark_by_year(engine, export: bool = False) -> None:
+def plot_active_chapters_in_denmark_by_year(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, ACTIVE_CHAPTERS_IN_DENMARK_BY_YEAR_QUERY)
 	if df.empty:
 		print("No Denmark active chapter data found.")
@@ -492,7 +566,7 @@ def plot_active_chapters_in_denmark_by_year(engine, export: bool = False) -> Non
 	export_dataframe(df, "active_chapters_in_denmark_by_year", export)
 	print(df.to_string(index=False))
 
-	plt.figure(figsize=(10, 6))
+	fig = plt.figure(figsize=(10, 6))
 	bars = plt.bar(df["year"].astype(int).astype(str), df["active_chapter_count"])
 	plt.title("Active Chapters in Denmark by Year")
 	plt.xlabel("Year")
@@ -508,10 +582,11 @@ def plot_active_chapters_in_denmark_by_year(engine, export: bool = False) -> Non
 			va="bottom",
 		)
 	plt.tight_layout()
+	export_plot_figure(fig, "active_chapters_in_denmark_by_year_plot", export_image)
 	plt.show()
 
 
-def plot_world_chapters_by_year(engine, export: bool = False) -> None:
+def plot_world_chapters_by_year(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, WORLD_CHAPTER_STATUS_BY_YEAR_QUERY)
 
 	if df.empty:
@@ -528,7 +603,7 @@ def plot_world_chapters_by_year(engine, export: bool = False) -> None:
 	export_dataframe(df, "world_chapters_by_year", export)
 	print(df.to_string(index=False))
 
-	plt.figure(figsize=(12, 6))
+	fig = plt.figure(figsize=(12, 6))
 	x_labels = df["year"].astype(str).tolist()
 	active_counts = df["active_chapter_count"].tolist()
 	inactive_with_history_counts = df["inactive_with_approved_history_count"].tolist()
@@ -609,10 +684,11 @@ def plot_world_chapters_by_year(engine, export: bool = False) -> None:
 		)
 
 	plt.tight_layout()
+	export_plot_figure(fig, "world_chapters_by_year_plot", export_image)
 	plt.show()
 
 
-def plot_world_active_vs_joined_by_year(engine, export: bool = False) -> None:
+def plot_world_active_vs_joined_by_year(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, WORLD_CHAPTER_STATUS_BY_COUNTRY_YEAR_QUERY)
 
 	if df.empty:
@@ -639,7 +715,7 @@ def plot_world_active_vs_joined_by_year(engine, export: bool = False) -> None:
 	cols = 4
 	rows = (num_countries + cols - 1) // cols
 
-	fig, axes = plt.subplots(rows, cols, figsize=(16, 4 * rows))
+	fig, axes = plt.subplots(rows, cols, figsize=(22, 5.5 * rows), constrained_layout=True)
 	axes = axes.flatten()
 
 	for idx, country in enumerate(country_totals):
@@ -677,7 +753,8 @@ def plot_world_active_vs_joined_by_year(engine, export: bool = False) -> None:
 		ax.set_title(f"{country}")
 		ax.set_xlabel("Year")
 		ax.set_ylabel("Chapter Count")
-		ax.tick_params(axis="x", rotation=45)
+		ax.tick_params(axis="x", rotation=45, labelsize=8)
+		ax.tick_params(axis="y", labelsize=8)
 
 		# Add data labels
 		for i, bar in enumerate(bars_active):
@@ -733,13 +810,19 @@ def plot_world_active_vs_joined_by_year(engine, export: bool = False) -> None:
 	for idx in range(num_countries, len(axes)):
 		axes[idx].set_visible(False)
 
-	fig.suptitle("World Chapters by Country: Active and Inactive Breakdown", fontsize=14, fontweight="bold")
-	fig.legend(["Active Chapters", "Inactive (Approved History)", "Inactive (No Approved Rides)"], loc="upper right")
-	plt.tight_layout()
+	fig.suptitle("World Chapters by Country: Active and Inactive Breakdown", fontsize=16, fontweight="bold")
+	fig.legend(
+		["Active Chapters", "Inactive (Approved History)", "Inactive (No Approved Rides)"],
+		loc="upper center",
+		ncol=3,
+		bbox_to_anchor=(0.5, 1.02),
+		fontsize=10,
+	)
+	export_plot_figure(fig, "world_active_vs_joined_by_year_plot", export_image, dpi=600)
 	plt.show()
 
 
-def plot_denmark_active_vs_joined_by_year(engine, export: bool = False) -> None:
+def plot_denmark_active_vs_joined_by_year(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, DENMARK_CHAPTER_STATUS_BY_YEAR_QUERY)
 
 	if df.empty:
@@ -756,7 +839,7 @@ def plot_denmark_active_vs_joined_by_year(engine, export: bool = False) -> None:
 	export_dataframe(df, "denmark_active_vs_joined_by_year", export)
 	print(df.to_string(index=False))
 
-	plt.figure(figsize=(12, 6))
+	fig = plt.figure(figsize=(12, 6))
 	x_labels = df["year"].astype(str).tolist()
 	active_counts = df["active_chapter_count"].tolist()
 	inactive_with_history_counts = df["inactive_with_approved_history_count"].tolist()
@@ -835,10 +918,11 @@ def plot_denmark_active_vs_joined_by_year(engine, export: bool = False) -> None:
 		)
 
 	plt.tight_layout()
+	export_plot_figure(fig, "denmark_active_vs_joined_by_year_plot", export_image)
 	plt.show()
 
 
-def plot_us_chapter_count(engine, export: bool = False) -> None:
+def plot_us_chapter_count(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, CHAPTERS_PER_COUNTRY_QUERY)
 	if df.empty:
 		print("No data returned for US chapter count query.")
@@ -848,7 +932,7 @@ def plot_us_chapter_count(engine, export: bool = False) -> None:
 	print(df.to_string(index=False))
 
 	count = int(df.loc[0, "us_chapter_count"])
-	plt.figure(figsize=(6, 4))
+	fig = plt.figure(figsize=(6, 4))
 	bars = plt.bar(["United States"], [count])
 	plt.title("Number of Chapters in the United States")
 	plt.ylabel("Chapter Count")
@@ -862,10 +946,11 @@ def plot_us_chapter_count(engine, export: bool = False) -> None:
 			va="bottom",
 		)
 	plt.tight_layout()
+	export_plot_figure(fig, "us_chapter_count_plot", export_image)
 	plt.show()
 
 
-def plot_active_us_chapters(engine, export: bool = False) -> None:
+def plot_active_us_chapters(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, ACTIVE_CHAPTERS_PER_COUNTRY_QUERY)
 	if df.empty:
 		print("No active chapters found with 2 or more rides in the past year.")
@@ -874,7 +959,7 @@ def plot_active_us_chapters(engine, export: bool = False) -> None:
 	export_dataframe(df, "active_us_chapters", export)
 	print(df.to_string(index=False))
 
-	plt.figure(figsize=(12, 6))
+	fig = plt.figure(figsize=(12, 6))
 	bars = plt.bar(df["country"], df["active_chapter_count"])
 	plt.title("Active Chapters by Country (2+ Approved Rides in Past Year)")
 	plt.xlabel("Country")
@@ -890,10 +975,11 @@ def plot_active_us_chapters(engine, export: bool = False) -> None:
 			va="bottom",
 		)
 	plt.tight_layout()
+	export_plot_figure(fig, "active_us_chapters_plot", export_image)
 	plt.show()
 
 
-def plot_total_chapters_by_country(engine, export: bool = False) -> None:
+def plot_total_chapters_by_country(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, TOTAL_CHAPTERS_PER_COUNTRY_QUERY)
 	if df.empty:
 		print("No chapters found.")
@@ -902,7 +988,7 @@ def plot_total_chapters_by_country(engine, export: bool = False) -> None:
 	export_dataframe(df, "total_chapters_by_country", export)
 	print(df.to_string(index=False))
 
-	plt.figure(figsize=(12, 6))
+	fig = plt.figure(figsize=(12, 6))
 	bars = plt.bar(df["country"], df["total_chapter_count"])
 	plt.title("Total Chapters by Country")
 	plt.xlabel("Country")
@@ -918,10 +1004,11 @@ def plot_total_chapters_by_country(engine, export: bool = False) -> None:
 			va="bottom",
 		)
 	plt.tight_layout()
+	export_plot_figure(fig, "total_chapters_by_country_plot", export_image)
 	plt.show()
 
 
-def plot_chapters_stacked_by_country(engine, export: bool = False) -> None:
+def plot_chapters_stacked_by_country(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, WORLD_CHAPTER_STATUS_BY_COUNTRY_YEAR_QUERY)
 
 	if df.empty:
@@ -939,7 +1026,7 @@ def plot_chapters_stacked_by_country(engine, export: bool = False) -> None:
 	export_dataframe(df_2025, "chapters_stacked_by_country", export)
 	print(df_2025.to_string(index=False))
 
-	plt.figure(figsize=(14, 7))
+	fig = plt.figure(figsize=(14, 7))
 	bar_width = 0.6
 	x_pos = range(len(df_2025))
 
@@ -991,6 +1078,7 @@ def plot_chapters_stacked_by_country(engine, export: bool = False) -> None:
 		plt.text(i, total + 0.5, f"{total}", ha="center", va="bottom", fontsize=8, fontweight="bold")
 
 	plt.tight_layout()
+	export_plot_figure(fig, "chapters_stacked_by_country_plot", export_image)
 	plt.show()
 
 
@@ -1014,7 +1102,7 @@ def show_inactive_pilots(engine, export: bool = False) -> None:
 	print(df.to_string(index=False))
 
 
-def plot_inactive_pilots(engine, export: bool = False) -> None:
+def plot_inactive_pilots(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, PILOTS_INACTIVE_QUERY)
 	if df.empty:
 		print("No inactive pilots found based on the current dataset window.")
@@ -1035,7 +1123,7 @@ def plot_inactive_pilots(engine, export: bool = False) -> None:
 	plot_rows.sort(key=lambda row: row[0])
 	plot_df = pd.DataFrame(plot_rows, columns=["bucket_start", "bucket_label", "inactive_pilot_count"])
 
-	plt.figure(figsize=(12, 6))
+	fig = plt.figure(figsize=(12, 6))
 	bars = plt.bar(plot_df["bucket_label"], plot_df["inactive_pilot_count"])
 	plt.title("Inactive Pilots by Completed Approved Rides")
 	plt.xlabel("Approved Rides Completed")
@@ -1051,6 +1139,7 @@ def plot_inactive_pilots(engine, export: bool = False) -> None:
 			va="bottom",
 		)
 	plt.tight_layout()
+	export_plot_figure(fig, "inactive_pilots_plot", export_image)
 	plt.show()
 
 
@@ -1064,7 +1153,7 @@ def show_pilot_trip_counts(engine, export: bool = False) -> None:
 	print(df.to_string(index=False))
 
 
-def plot_pilot_trip_counts(engine, export: bool = False) -> None:
+def plot_pilot_trip_counts(engine, export: bool = False, export_image: bool = False) -> None:
 	df = query_to_dataframe(engine, PILOT_TRIP_COUNTS_QUERY)
 	if df.empty:
 		print("No pilot trip count data found.")
@@ -1088,7 +1177,7 @@ def plot_pilot_trip_counts(engine, export: bool = False) -> None:
 	plot_rows.sort(key=lambda row: row[0])
 	plot_df = pd.DataFrame(plot_rows, columns=["bucket_start", "bucket_label", "pilot_count"])
 
-	plt.figure(figsize=(12, 6))
+	fig = plt.figure(figsize=(12, 6))
 	bars = plt.bar(plot_df["bucket_label"], plot_df["pilot_count"])
 	plt.title("Pilot Counts by Completed Approved Ride Buckets")
 	plt.xlabel("Approved Rides Completed")
@@ -1104,7 +1193,83 @@ def plot_pilot_trip_counts(engine, export: bool = False) -> None:
 			va="bottom",
 		)
 	plt.tight_layout()
+	export_plot_figure(fig, "pilot_trip_counts_plot", export_image)
 	plt.show()
+
+
+def plot_avg_rides_per_pilot_by_country(engine, export: bool = False, export_image: bool = False) -> None:
+	df = query_to_dataframe(engine, AVG_RIDES_PER_PILOT_BY_COUNTRY_QUERY)
+	if df.empty:
+		print("No avg rides per pilot by country data found.")
+		return
+
+	df["avg_rides_active_pilots"] = pd.to_numeric(df["avg_rides_active_pilots"], errors="coerce")
+	df["avg_rides_inactive_pilots"] = pd.to_numeric(df["avg_rides_inactive_pilots"], errors="coerce")
+	df["avg_rides_all_pilots"] = pd.to_numeric(df["avg_rides_all_pilots"], errors="coerce")
+	df = df.sort_values("avg_rides_all_pilots", ascending=False, na_position="last")
+
+	export_dataframe(df, "avg_rides_per_pilot_by_country", export)
+	print(df.to_string(index=False))
+
+	plot_specs = [
+		(
+			"avg_rides_active_pilots",
+			"active_pilot_count",
+			"Average Approved Rides per Active Pilot by Country",
+			"avg_rides_per_active_pilot_by_country_plot",
+			"#2E8B57",
+		),
+		(
+			"avg_rides_inactive_pilots",
+			"inactive_pilot_count",
+			"Average Approved Rides per Inactive Pilot by Country",
+			"avg_rides_per_inactive_pilot_by_country_plot",
+			"#CD5C5C",
+		),
+		(
+			"avg_rides_all_pilots",
+			"total_pilot_count",
+			"Average Approved Rides per Pilot by Country (All Pilots)",
+			"avg_rides_per_all_pilots_by_country_plot",
+			"#4169E1",
+		),
+	]
+
+	for column_name, count_column, title, output_name, color in plot_specs:
+		plot_df = (
+			df[["country", column_name, count_column]]
+			.dropna(subset=[column_name])
+			.sort_values(column_name, ascending=False)
+			.head(20)
+		)
+
+		if plot_df.empty:
+			print(f"No data found for {column_name}.")
+			continue
+
+		fig = plt.figure(figsize=(15, 7))
+		bars = plt.bar(plot_df["country"], plot_df[column_name], color=color)
+		plt.title(title)
+		plt.xlabel("Country")
+		plt.ylabel("Average Approved Rides")
+		plt.xticks(rotation=45, ha="right")
+
+		for idx, bar in enumerate(bars):
+			height = bar.get_height()
+			x_pos = bar.get_x() + bar.get_width() / 2
+			n_pilots = int(plot_df.iloc[idx][count_column])
+			plt.text(
+				x_pos,
+				height,
+				f"{height:.2f} (n={n_pilots})",
+				ha="center",
+				va="bottom",
+				fontsize=8,
+			)
+
+		plt.tight_layout()
+		export_plot_figure(fig, output_name, export_image, dpi=400)
+		plt.show()
 
 
 def parse_args() -> argparse.Namespace:
@@ -1116,6 +1281,7 @@ def parse_args() -> argparse.Namespace:
 		nargs="+",
 		choices=[
 			"avg_duration",
+			"avg_rides_per_pilot_by_country",
 			"us_chapter_count",
 			"active_us_chapters",
 			"active_chapters_in_denmark_by_year",
@@ -1156,6 +1322,11 @@ def parse_args() -> argparse.Namespace:
 		action="store_true",
 		help="Export query results to CSV files in data_export/.",
 	)
+	parser.add_argument(
+		"--export-image",
+		action="store_true",
+		help="Export generated plots to PNG files in data_export/.",
+	)
 	return parser.parse_args()
 
 
@@ -1165,19 +1336,20 @@ def main() -> int:
 	engine = create_db_engine()
 
 	function_map = {
-		"avg_duration": lambda db_engine: plot_avg_trip_duration_by_country(db_engine, args.export),
-		"us_chapter_count": lambda db_engine: plot_us_chapter_count(db_engine, args.export),
-		"active_us_chapters": lambda db_engine: plot_active_us_chapters(db_engine, args.export),
-		"active_chapters_in_denmark_by_year": lambda db_engine: plot_active_chapters_in_denmark_by_year(db_engine, args.export),
-		"denmark_active_vs_joined_by_year": lambda db_engine: plot_denmark_active_vs_joined_by_year(db_engine, args.export),
-		"world_chapters_by_year": lambda db_engine: plot_world_chapters_by_year(db_engine, args.export),
-		"world_active_vs_joined_by_year": lambda db_engine: plot_world_active_vs_joined_by_year(db_engine, args.export),
-		"total_chapters_by_country": lambda db_engine: plot_total_chapters_by_country(db_engine, args.export),
-		"chapters_stacked_by_country": lambda db_engine: plot_chapters_stacked_by_country(db_engine, args.export),
+		"avg_duration": lambda db_engine: plot_avg_trip_duration_by_country(db_engine, args.export, args.export_image),
+		"avg_rides_per_pilot_by_country": lambda db_engine: plot_avg_rides_per_pilot_by_country(db_engine, args.export, args.export_image),
+		"us_chapter_count": lambda db_engine: plot_us_chapter_count(db_engine, args.export, args.export_image),
+		"active_us_chapters": lambda db_engine: plot_active_us_chapters(db_engine, args.export, args.export_image),
+		"active_chapters_in_denmark_by_year": lambda db_engine: plot_active_chapters_in_denmark_by_year(db_engine, args.export, args.export_image),
+		"denmark_active_vs_joined_by_year": lambda db_engine: plot_denmark_active_vs_joined_by_year(db_engine, args.export, args.export_image),
+		"world_chapters_by_year": lambda db_engine: plot_world_chapters_by_year(db_engine, args.export, args.export_image),
+		"world_active_vs_joined_by_year": lambda db_engine: plot_world_active_vs_joined_by_year(db_engine, args.export, args.export_image),
+		"total_chapters_by_country": lambda db_engine: plot_total_chapters_by_country(db_engine, args.export, args.export_image),
+		"chapters_stacked_by_country": lambda db_engine: plot_chapters_stacked_by_country(db_engine, args.export, args.export_image),
 		"inactive_pilots": lambda db_engine: show_inactive_pilots(db_engine, args.export),
-		"inactive_pilots_plot": lambda db_engine: plot_inactive_pilots(db_engine, args.export),
+		"inactive_pilots_plot": lambda db_engine: plot_inactive_pilots(db_engine, args.export, args.export_image),
 		"pilot_trip_counts": lambda db_engine: show_pilot_trip_counts(db_engine, args.export),
-		"pilot_trip_counts_plot": lambda db_engine: plot_pilot_trip_counts(db_engine, args.export),
+		"pilot_trip_counts_plot": lambda db_engine: plot_pilot_trip_counts(db_engine, args.export, args.export_image),
 		#"user_emails_csv": lambda db_engine: export_user_emails_csv(db_engine, args.output),
 		"pilot_details_by_ride_count": lambda db_engine: show_pilot_details_by_ride_count(db_engine, args.ride_count, args.export),
 

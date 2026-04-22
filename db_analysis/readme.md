@@ -3,6 +3,9 @@
 will export the data to a csv file int the data_export folder
 ```--export```
 
+## export-image
+will export generated plots to png files in the data_export folder
+```--export-image```
 
 # number of rides per pilot
 python data.py --run pilot_trip_counts_plot
@@ -33,12 +36,20 @@ python data.py --run world_chapters_by_year --export
 ## Active vs inactive chapers by country by year
 python data.py --run world_active_vs_joined_by_year --export
 
+## Active vs inactive chapers by country by year + plot image export
+python data.py --run world_active_vs_joined_by_year --export --export-image
+
 ## Stacked Box Plot for active and inactive chapters
 python data.py --run chapters_stacked_by_country
 
 # Number of rides per number of pilots per chapter by country
+python data.py --run avg_rides_per_pilot_by_country
 
-# How mnay cancelled rides are there
+## Number of rides per pilot per country (CSV + 3 plot exports)
+python data.py --run avg_rides_per_pilot_by_country --export --export-image
+
+# Canceled rides per country
+
 
 # Rides per month per country
 
